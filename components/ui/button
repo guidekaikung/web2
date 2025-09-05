@@ -1,0 +1,5 @@
+<template>
+  <div>
+    <q-btn color="purple" label="Purple" />
+  </div>
+  </template>
