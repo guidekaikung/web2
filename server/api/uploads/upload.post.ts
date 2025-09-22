@@ -9,6 +9,7 @@ import mongoose from 'mongoose'
 import FileModel from '~/server/models/file'
 import Timeline from '~/server/models/Timeline'
 import { decodeThai, parseZAAR020, type ParseResult } from '~/server/utils/parse-zaar020'
+import Row from '~/server/models/Row'
 
 // helper
 const getField = (v: any) => (Array.isArray(v) ? v[0] : v)
@@ -28,7 +29,10 @@ export default defineEventHandler(async (event) => {
       try {
         if (err) return reject(err)
 
-        const file = (files.file?.[0] || files.file) as FormidableFile
+        const any = files as Record<string, any>
+        const firstKey = Object.keys(any)[0]
+        const picked = firstKey ? any[firstKey] : undefined
+        const file = (Array.isArray(picked) ? picked[0] : picked) as FormidableFile | undefined
         if (!file) {
           setResponseStatus(event, 400)
           return resolve({
@@ -46,7 +50,6 @@ export default defineEventHandler(async (event) => {
         const amountRaw  = getField(fields.amount)
         const amount     = amountRaw !== undefined && amountRaw !== '' ? Number(amountRaw) : undefined
 
-        // ✅ การ์ดกรณีส่งข้อมูลไม่ครบ
         if (!requestNo || !stepKey) {
           setResponseStatus(event, 400)
           return resolve({
@@ -65,20 +68,28 @@ export default defineEventHandler(async (event) => {
         const buffer = fs.readFileSync(file.filepath)
         const sha256 = crypto.createHash('sha256').update(buffer).digest('hex')
 
-        // กันไฟล์เดิมซ้ำทั้งก้อน
-        const dup = await FileModel.findOne({ fileSha256: sha256 }).lean()
-        if (dup) {
-          setResponseStatus(event, 409)
-          return resolve({
-            success: false,
-            code: 'DUPLICATE_FILE',
-            error: 'ไฟล์นี้ถูกอัปโหลดไปแล้ว',
-            user_message: 'ไฟล์นี้อัปโหลดไปแล้ว'
-          })
+        // ✅ ตรวจซ้ำ "เฉพาะ Step 1" แบบ Global (ข้ามคำขอ)
+        if (stepKey === '1') {
+            const dupHash = await FileModel.findOne({
+              step: '1',
+              fileSha256: sha256
+            }).lean()
+
+          if (dupHash) {
+            setResponseStatus(event, 409)
+            return resolve({
+              success: false,
+              code: 'DUPLICATE_FILE_HASH_STEP1',
+              error: 'ไฟล์นี้ถูกอัปโหลดแล้ว',
+              user_message: 'ไฟล์นี้ถูกอัปโหลดแล้ว'
+            })
+          }
         }
 
         let parsed: ParseResult | null = null
-        if (ext === '.txt') {
+
+        // ✅ พาร์ส ZAAR020 + เช็กเลขทรัพย์ซ้ำ "เฉพาะ Step 1" เท่านั้น
+        if (stepKey === '1' && ext === '.txt') {
           const text = decodeThai(buffer)
           try {
             parsed = parseZAAR020(text)
@@ -160,38 +171,46 @@ export default defineEventHandler(async (event) => {
         const nameOnly = path.parse(originalName).name.replace(/\s+/g, '_')
         const storedFilename = `${stepKey}__${nameOnly}__${datePart}${ext}`
 
-        // บันทึกไฟล์ลง files
-        const created = await FileModel.create({
-          request_no: requestNo,
-          step: stepKey,
-          storedFilename,
-          originalFilename: originalName,
-          mimetype,
-          uploadedAt: now,
-          documentNo,
-          dateSigned,
-          amount,
-          data: buffer,
+        // บันทึกไฟล์ลง files (จับ E11000 ของ unique index ใหม่ไว้ด้วย)
+        let created
+        try {
+          created = await FileModel.create({
+            request_no: requestNo,
+            step: stepKey,
+            storedFilename,
+            originalFilename: originalName,
+            mimetype,
+            uploadedAt: now,
+            documentNo,
+            dateSigned,
+            amount,
+            data: buffer,
 
-          fileSha256: sha256,
-          program: parsed?.program,
-          unit_display: parsed?.unit_display,
-          asset_pea_numbers: parsed?.pea_numbers ?? [],
-        })
-
-        // ลงทะเบียนเลข PEA เข้า assets (เก็บ unit_display เสมอ)
-        if (parsed?.pea_numbers?.length) {
-          const db2 = mongoose.connection.db
-          if (db2) {
-            const assetsCol2 = db2.collection('assets')
-            const { strings: peaStr } = normalizePeaNumbers(parsed.pea_numbers)
-            if (peaStr.length) {
-              await assetsCol2.bulkWrite(
-                peaStr.map((n: string) => ({ insertOne: { document: { pea_no: n, unit_display: parsed!.unit_display, last_upload_id: created._id } } })),
-                { ordered: false }
-              ).catch(() => {})
+            fileSha256: sha256,
+            program: parsed?.program,
+            unit_display: parsed?.unit_display,
+            asset_pea_numbers: parsed?.pea_numbers ?? [],
+          })
+        } catch (e: any) {
+          if (e?.name === 'MongoServerError' && e?.code === 11000) {
+            const msg = String(e?.message || '')
+            setResponseStatus(event, 409)
+            if (msg.includes('uniq_step1_hash_global')) {
+              return resolve({
+                success: false,
+                code: 'DUPLICATE_FILE_HASH_STEP1',
+                error: 'ไฟล์นี้ถูกอัปโหลดแล้ว',
+                user_message: 'ไฟล์นี้ถูกอัปโหลดแล้ว'
+              })
             }
+            return resolve({
+              success: false,
+              code: 'DUPLICATE_KEY',
+              error: 'Duplicate key',
+              user_message: 'ข้อมูลซ้ำ'
+            })
           }
+          throw e
         }
 
         // อัปเดต Timeline เป็น done
@@ -206,7 +225,7 @@ export default defineEventHandler(async (event) => {
                 {
                   $set: {
                     'steps.$.status': 'done',
-                    'steps.$.file': storedFilename,
+                    'steps.$.file': String((created as any)._id),
                     'steps.$.createdAt': now,
                     'steps.$.amount': amount ?? undefined,
                     'steps.$.date_signed': dateSigned ?? undefined,
@@ -217,12 +236,28 @@ export default defineEventHandler(async (event) => {
             }
           }
         }
+        //  Step 3: อัปเดตเลขหนังสือ + วันที่อนุมัติ ลง Row
+        if (stepKey === '3') {
+          const approvedAt = dateSigned ? new Date(dateSigned) : now
+          const approvedAtSafe = isNaN(approvedAt.getTime()) ? now : approvedAt
+
+          // ไม่ทับค่า book_no เดิมถ้า documentNo ส่งมาเป็นค่าว่าง
+          const $set: Record<string, any> = { step3_at: approvedAtSafe }
+          if (documentNo) $set.book_no = documentNo
+
+          await Row.updateOne(
+            { request_no: requestNo },
+            { $set }
+          )
+        }
 
         return resolve({
           success: true,
           id: (created as any)._id,
           filename: storedFilename,
-          originalName: originalName,
+          originalName,
+          mimetype,
+          url: `/api/uploads/${String((created as any)._id)}`,  // ✅ เพิ่ม URL สำหรับพรีวิว
           createdAt: (created as any).createdAt ?? now,
           timelineUpdated: Boolean(requestNo && stepKey)
         })

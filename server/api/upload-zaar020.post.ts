@@ -1,6 +1,7 @@
 import { defineEventHandler, setResponseStatus } from 'h3';
 import formidable, { type Files, type File as FormFile } from 'formidable';
-import mongoose from 'mongoose';
+import mongoose from 'mongoose'
+const { Schema, model, models } = mongoose
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { decodeThai, parseZAAR020 } from '~/server/utils/parse-zaar020';

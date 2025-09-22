@@ -1,43 +1,32 @@
-// server/api/rows/create.ts
 import { defineEventHandler, readBody, sendError, createError } from 'h3'
 import Row from '~/server/models/Row'
 import Timeline from '~/server/models/Timeline'
 import { makeTimelineTemplate } from '~/server/utils/timelineTemplate'
 import dbConnect from '~/server/utils/db'
+import Counter from '~/server/models/Counter'
 
 export default defineEventHandler(async (event) => {
   try {
-    const body = await readBody(event)
     await dbConnect()
+    const body = await readBody(event)
 
-    // หา request ล่าสุดเพื่อกันสร้างใหม่ถ้า step1 ยังไม่ผ่าน
-    const lastRow = await Row.findOne().sort({ created_at: -1 }).exec()
-    let nextNumber = 1
-    if (lastRow?.request_no) {
-      const m = lastRow.request_no.match(/WAMCLBR(\d+)/)
-      if (m) nextNumber = parseInt(m[1]) + 1
-
-      // ✅ การ์ด: ห้ามสร้างคำขอใหม่ ถ้า request ล่าสุดยังไม่ผ่าน Step 1
-      const tl = await Timeline.findOne({ request_no: lastRow.request_no }).lean()
-      const steps = (tl as any)?.steps || []
-      const s1 = steps.find((s: any) => String(s.no) === '1')
-      if (!s1 || s1.status !== 'done') {
-        return sendError(event, createError({
-          statusCode: 409,
-          statusMessage: 'STEP1_NOT_DONE',
-          data: { ok: false, code: 'STEP1_NOT_DONE', message: `ยังไม่ได้อัปโหลดไฟล์ Step 1 ให้ผ่านของ ${lastRow.request_no}` }
-        }))
-      }
+    // ออกเลขด้วย Counter (อะตอมมิก)
+    const ctr = await Counter.findOneAndUpdate(
+      { name: 'request_no' },
+      { $inc: { seq: 1 } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    )
+    if (!ctr) {
+      throw createError({ statusCode: 500, statusMessage: 'CounterNotCreated' })
     }
 
-    const newRequestNo = `WAMCLBR${nextNumber.toString().padStart(4, '0')}`
+    const newRequestNo = `WAMCLBR${String(ctr.seq).padStart(6, '0')}` // เปลี่ยนเป็น 4/6 หลักตามต้องการ
 
-    const newRow = new Row({
+    const newRow = await Row.create({
       request_no: newRequestNo,
       book_no: body.book_no,
       book_date: body.book_date
     })
-    await newRow.save()
 
     const exists = await Timeline.findOne({ request_no: newRequestNo }).lean()
     if (!exists) {
@@ -47,9 +36,10 @@ export default defineEventHandler(async (event) => {
       })
     }
 
-    return { success: true, request_no: newRequestNo }
+    return { success: true, request_no: newRequestNo, data: newRow }
   } catch (error: any) {
-    console.error('[CREATE ERROR]', error?.message || error)
-    return sendError(event, createError({ statusCode: 500, statusMessage: 'Create Failed' }))
+    console.error('[rows/create] ERROR:', error?.stack || error)
+    // ส่ง 500 ออกไปให้ frontend เห็น ไม่ใช่ 503
+    return sendError(event, createError({ statusCode: error?.statusCode || 500, statusMessage: error?.statusMessage || 'Create Failed' }))
   }
 })

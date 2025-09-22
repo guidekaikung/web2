@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+const { Schema, model, models } = mongoose
 
 const approveSchema = new mongoose.Schema({
   step: String,

@@ -14,6 +14,7 @@
           <th class="text-center">ลงวันที่</th>
         </tr>
       </thead>
+
       <tbody>
         <tr v-for="(row, i) in model" :key="i">
           <td style="position: relative">
@@ -28,17 +29,40 @@
               <div
                 v-else
                 class="timeline timeline-line-full"
-                :class="
-                  row.status === 20
-                    ? 'success-top success-bottom'
-                    : 'unsuccess-top unsuccess-bottom'
-                "
-              ></div>
+                :class="row.status === 20 ? 'success-top success-bottom' : 'unsuccess-top unsuccess-bottom'"
+              />
             </div>
           </td>
+
           <td class="text-left">{{ row.no }}</td>
           <td class="text-left">{{ row.operator }}</td>
-          <td class="text-left">{{ row.detail }}</td>
+          <td class="text-left">
+            {{ row.detail }}
+
+            <!-- แสดงไอคอน i วงกลมเฉพาะแถวที่มี tooltip -->
+            <q-icon
+              v-if="stepTooltips[String(row.no)]"
+              name="info"              
+              size="18px"
+              class="q-ml-xs text-primary cursor-pointer"
+              aria-label="ดูคำอธิบาย"
+            >
+              <q-tooltip
+                :delay="0"
+                anchor="top middle"
+                self="bottom middle"
+                :offset="[8,8]"
+                transition-show="fade"
+                transition-hide="fade"
+                class="tooltip-lg text-body1 q-pa-sm"
+              >
+                <div style="white-space: pre-line; max-width: 420px;">
+                  {{ stepTooltips[String(row.no)] }}
+                </div>
+              </q-tooltip>
+            </q-icon>
+          </td>
+
           <td class="text-left">
             <template v-if="templateMap[String(row.no)]">
               <a :href="docHref(row)" class="text-primary">
@@ -49,16 +73,38 @@
               {{ row.document || '-' }}
             </template>
           </td>
+
+          <!-- ✅ ใช้คอมโพเนนต์ Upload/Preview ที่ทำไว้ -->
           <td class="text-left">
-            <template v-if="!['4.1', '4.2', '6', '7.1', '7.2'].includes(String(row.no))">
-              <div class="column">
-                <q-btn flat label="Upload" @click="openUploadDialog(i)" />
-                <small v-if="row.document_hint" class="text-caption text-grey">
-                  เอกสารที่ต้องใช้: {{ row.document_hint }}
-                </small>
-              </div>
-            </template>
-          </td>
+            <template v-if="shouldShowUpload(row)">
+              <UploadDownloadAction
+                :row="{ step: String(row.no), request_no: requestNo, file: row.file }"
+                @update-row="(updated) => {
+                  // จับทั้ง null/undefined/'' กรณีลบไฟล์
+                  if (updated.file == null || updated.file === '') {
+                    row.file = undefined
+                    row.status = 10  // pending
+                    // ล้างค่าที่ผูกกับไฟล์ (ถ้าต้องการให้ UI เคลียร์ด้วย)
+                    row.document_no = ''
+                    row.amount = undefined
+                    row.date_signed = ''
+                    return
+                  }
+                  // อัปเดตเฉพาะ field ที่เกี่ยวข้อง
+                  row.file = updated.file ?? row.file
+                  if (updated.document_no !== undefined) row.document_no = updated.document_no
+                  if (updated.amount !== undefined) row.amount = updated.amount
+                  if (updated.date_signed !== undefined) row.date_signed = updated.date_signed
+
+                  // ถ้ามีไฟล์แล้ว → done
+                  if (row.file) row.status = 20
+                }"
+              />
+                  <small v-if="row.document_hint" class="text-caption text-grey">
+            เอกสารที่ต้องใช้: {{ row.document_hint }}
+          </small>
+        </template>
+        </td>
           <td class="text-left">
             <template v-if="row.amount">
               {{ row.document_no }} — จำนวนเงิน: {{ formatAmount(row.amount) }}
@@ -67,47 +113,19 @@
               {{ row.document_no || '-' }}
             </template>
           </td>
+
           <td class="text-left">{{ row.comment }}</td>
           <td class="text-left">{{ row.createdAt ? row.createdAt.split('T')[0] : row.date }}</td>
         </tr>
       </tbody>
     </q-markup-table>
-    <!-- ✅ ข้อ 3: Upload Popup -->
-    <q-dialog v-model="showDialog">
-      <q-card style="min-width: 400px">
-        <q-card-section>
-          <div class="text-h6">อัปโหลดเอกสาร</div>
-        </q-card-section>
-        <q-card-section>
-          <q-file v-model="uploadForm.file" label="เลือกไฟล์เอกสาร" filled />
-          <q-input v-model="uploadForm.date_signed" label="วันที่ลงหนังสือ" type="date" filled class="q-mt-sm" />
-          <q-input
-            v-if="['2','3'].includes(String(currentStep?.no))"
-            v-model="uploadForm.document_no"
-            label="เลขที่หนังสือ"
-            filled class="q-mt-sm"
-          />
-          <q-input
-            v-if="String(currentStep?.no) === '9'"
-            v-model.number="uploadForm.amount"
-            label="จำนวนเงิน"
-            type="number"
-            filled class="q-mt-sm"
-          />
-        </q-card-section>
-        <q-card-actions align="right">
-          <q-btn flat label="ยกเลิก" v-close-popup />
-          <q-btn color="primary" label="อัปโหลด" @click="confirmUpload" />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, watch, toRef } from 'vue'
-import axios from 'axios'
 import { useQuasar } from 'quasar'
+import UploadDownloadAction from '~/components/UploadDownloadAction.vue'
 
 const $q = useQuasar()
 
@@ -119,138 +137,90 @@ interface TimelineItem {
   no: number | string
   operator: string
   detail: string
-  status: number            // 10=pending, 20=done (เพื่อให้ class/ไอคอนเดิมใช้ได้)
+  status: number            // 10=pending, 20=done
   statusDesciption: string
   document: string
   document_no: string
   date: string
   comment: string
-  file?: string
+  file?: string            // <-- จะเก็บ _id ของไฟล์
   amount?: number
   date_signed?: string
   document_hint?: string
   createdAt?: string
   url?: string
 }
-const templateMap: Record<string, string> = {
-  '2':   'test.pdf',          // หนังสือขออนุมัติจำหน่ายมิเตอร์ฯ
-  '3':   'test.pdf',           // หนังสืออนุมัติจำหน่ายจากผู้มีอำนาจฯ
-  '4':   'test.pdf',           // คำนวณราคาและขออนุมัติฯ
-  '5':   'test.pdf',           // หนังสืออนุมัติหลักการขาย
-  '7':   'test.pdf',
-  '8':   'test.pdf',
-  '9':   'test.pdf',
-  '10':   'test.pdf',
-  '11':   'test.pdf',
-  '12':   'test.pdf',
-  '13':   'test.pdf',
+
+const HIDE_UPLOAD_STEPS = new Set(['4.1', '4.2', '6', '7.1', '7.2'])
+
+function shouldShowUpload(row: TimelineItem) {
+  return !HIDE_UPLOAD_STEPS.has(String(row.no))
 }
 
+const templateMap: Record<string, string> = {
+  '2': '/templates/test.pdf',
+  '3': '/templates/test.pdf',
+  '4': '/templates/test.pdf',
+  '5': '/templates/test.pdf',
+  '7': '/templates/test.pdf',
+  '8': '/templates/test.pdf',
+  '9': '/templates/test.pdf',
+  '10': '/templates/test.pdf',
+  '11': '/templates/test.pdf',
+  '12': '/templates/test.pdf',
+  '13': '/templates/test.pdf',
+}
+const stepTooltips: Record<string, string> = {
+  '5': `ผู้มีอำนาจสั่งขาย ได้แก่
+1. ผชก. 
+2. ผจก.CEO 
+3. ผจก.จุดรวมงาน 
+4. ผจก.กฟส. `,
+  '8': `ผู้มีอำนาจสั่งขาย ได้แก่
+1. ผชก. 
+2. ผจก. CEO 
+3. ผจก.จุดรวมงาน 
+4. ผจก. กฟส. `
+}
 
 const model = ref<TimelineItem[]>([])
 
-const showDialog = ref(false)
-const currentIndex = ref(-1)
-const currentStep = ref<TimelineItem | null>(null)
-
-const uploadForm = ref({
-  file: null as File | null,
-  date_signed: '',
-  document_no: '',
-  amount: null as number | null
-})
-
-const DEV_FILE_BY_STEP: Record<string, string> = {
-  '1': '/files/test.pdf',
-  '2': '/files/test.pdf',
-  '3': '/files/test.pdf',
-  '4': '/files/test.pdf',
-  '5': '/files/test.pdf',
-  '6': '/files/test.pdf',
-  '7': '/files/test.pdf',
-}
-
 function formatAmount(value: number) {
-  return new Intl.NumberFormat('th-TH', {
-    style: 'decimal',
-    minimumFractionDigits: 0
-  }).format(value) + ' บาท'
+  return new Intl.NumberFormat('th-TH', { style: 'decimal', minimumFractionDigits: 0 }).format(value) + ' บาท'
 }
 
-function openUploadDialog(index: number) {
-  currentIndex.value = index
-  currentStep.value = model.value[index] || null
-  showDialog.value = true
-  uploadForm.value = {
-    file: null,
-    date_signed: '',
-    document_no: currentStep.value?.document_no || '',
-    amount: currentStep.value?.amount ?? null
+/* ========== โหลด Timeline จาก API ตาม request_no ========== */
+async function fetchTimeline(rno: string) {
+  if (!rno) return
+  try {
+    const res: any = await $fetch(`/api/timelines/${encodeURIComponent(rno)}`)
+    const steps = res?.steps ?? []
+    model.value = steps.map((s: any) => ({
+      no: s.no,
+      operator: s.operator ?? '',
+      detail: s.detail ?? '',
+      status: s.status === 'done' ? 20 : 10,
+      statusDesciption: '',
+      document: s.document ?? '',
+      document_no: s.document_no ?? '',
+      date: s.date ?? '',
+      comment: s.comment ?? '',
+      file: s.file || undefined,                         // ⬅️ ถ้ามี _id จะทำให้คอมโพเนนต์โชว์ “ดูไฟล์/ดาวน์โหลด”
+      amount: s.amount ?? undefined,
+      date_signed: s.date_signed ?? '',
+      document_hint: s.document_hint ?? '',
+      createdAt: s.createdAt ? new Date(s.createdAt).toISOString() : '',
+      url: s.url ?? ''
+    }))
+  } catch (err) {
+    console.error('Load timeline error:', err)
+    $q.notify({ type: 'negative', message: 'โหลด Timeline ไม่ได้' })
+    model.value = []
   }
 }
 
-async function confirmUpload() {
-  const stepNo = currentStep.value?.no
-  const file = uploadForm.value.file
-  if (!file || !stepNo) return
-
-  const allowedExtensions = ['.doc', '.docx', '.xls', '.xlsx', '.pdf', '.txt']
-  const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
-  if (!allowedExtensions.includes(ext)) {
-    $q.notify({ type: 'negative', message: 'ไฟล์ไม่อยู่ในรูปแบบที่อนุญาต' })
-    return
-  }
-
-  const formData = new FormData()
-  formData.append('file', file)
-  formData.append('step', String(stepNo))
-  formData.append('date_signed', uploadForm.value.date_signed)
-  formData.append('document_no', uploadForm.value.document_no || '')
-  formData.append('request_no', requestNo.value)
-  if (uploadForm.value.amount !== null && !isNaN(uploadForm.value.amount)) {
-    formData.append('amount', String(uploadForm.value.amount))
-  }
-
-   try {
-    // ✅ ยอมรับ 400/409 กลับมาให้เราตรวจเอง (จะได้อ่าน user_message)
-    const res = await axios.post('/api/uploads/upload', formData, {
-      validateStatus: s => (s >= 200 && s < 300) || s === 400 || s === 409
-    })
-
-    if (res.status < 300 && res.data?.success) {
-      // อัปเดต UI ตามของเดิม
-      const item = model.value[currentIndex.value]
-      if (item) {
-        item.file = res.data.id
-        item.document_no = uploadForm.value.document_no
-        item.amount = uploadForm.value.amount ?? undefined
-        item.date_signed = uploadForm.value.date_signed
-        item.createdAt = res.data.createdAt || new Date().toISOString()
-        item.status = 20
-      }
-      $q.notify({ type: 'positive', message: 'อัปโหลดเรียบร้อย' })
-      showDialog.value = false
-      return
-    }
-
-    // ❌ เคส error จาก backend: ดึง user_message มาก่อน ถ้าไม่มีค่อย fallback เป็น error/code
-    const d = res.data || {}
-    $q.notify({
-      type: 'negative',
-      message: d.user_message || d.error || 'อัปโหลดไม่สำเร็จ',
-      caption: d.code ? String(d.code) : `HTTP ${res.status}`
-    })
-  } catch (err: any) {
-    // ❌ network จริง ๆ (เช่น เซิร์ฟเวอร์ดับ) หรือ axios โยน error อย่างอื่น
-    console.error(err)
-    const d = err?.response?.data || {}
-    $q.notify({
-      type: 'negative',
-      message: d.user_message || 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้',
-      caption: d.code ? String(d.code) : (err?.message || 'Network error')
-    })
-  }
-}
+onMounted(() => { if (requestNo.value) fetchTimeline(requestNo.value) })
+watch(requestNo, (v) => { if (v) fetchTimeline(v) })
 
 function timelineClass(row: TimelineItem, index: number) {
   let response = ''
@@ -277,137 +247,40 @@ function timelineClass(row: TimelineItem, index: number) {
   return response
 }
 
-const downloadFile = async (id: string) => {
-  try {
-    const res = await fetch(`/api/uploads/get-download?id=${encodeURIComponent(id)}`)
-    if (!res.ok) throw new Error('ไม่พบไฟล์')
-
-    const blob = await res.blob()
-    const disposition = res.headers.get('Content-Disposition')
-
-    let filename = 'download.pdf'
-    if (disposition) {
-      const utf8Match = disposition.match(/filename\*=UTF-8''(.+)/)
-      const simpleMatch = disposition.match(/filename="(.+)"/)
-      if (utf8Match && utf8Match[1]) {
-        filename = decodeURIComponent(utf8Match[1])
-      } else if (simpleMatch && simpleMatch[1]) {
-        filename = simpleMatch[1]
-      }
-    }
-
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = filename
-    link.click()
-    URL.revokeObjectURL(url)
-  } catch (e) {
-    $q.notify({ type: 'negative', message: 'ไม่พบไฟล์สำหรับดาวน์โหลด' })
-  }
-}
-
-/* ========== โหลด Timeline จาก API ตาม request_no ========== */
-async function fetchTimeline(rno: string) {
-  if (!rno) return
-  try {
-  const res: any = await $fetch(`/api/timelines/${encodeURIComponent(rno)}`)
-  const steps = res?.steps ?? []
-  model.value = steps.map((s: any) => ({
-    no: s.no,
-    operator: s.operator ?? '',
-    detail: s.detail ?? '',
-    status: s.status === 'done' ? 20 : 10,   // map → UI 10/20
-    statusDesciption: '',
-    document: s.document ?? '',
-    document_no: s.document_no ?? '',
-    date: s.date ?? '',
-    comment: s.comment ?? '',
-    file: s.file || undefined,
-    amount: s.amount ?? undefined,
-    date_signed: s.date_signed ?? '',
-    document_hint: s.document_hint ?? '',
-    createdAt: s.createdAt ? new Date(s.createdAt).toISOString() : '',
-    url: s.url ?? ''
-    }))
-  } catch (err) {
-    console.error('Load timeline error:', err)
-    $q.notify({ type: 'negative', message: 'โหลด Timeline ไม่ได้' })
-    model.value = []
-  }
-}
-
-onMounted(() => { if (requestNo.value) fetchTimeline(requestNo.value) })
-watch(requestNo, (v) => { if (v) fetchTimeline(v) })
-
 function docHref(row: TimelineItem) {
   const stepStr = String(row.no)
-  const fallback = templateMap[stepStr] // อาจเป็น undefined ได้
-
+  const fallback = templateMap[stepStr]
   const params = new URLSearchParams()
   params.set('request_no', requestNo.value || '')
   params.set('step', stepStr)
-  if (fallback) params.set('fallback', fallback)  // ใส่เฉพาะเมื่อมีจริง
-
+  if (fallback) params.set('fallback', fallback)
   return `/api/uploads/get-latest?${params.toString()}`
 }
 </script>
 
-
-
 <style scoped>
-.timeline {
-  width: 30px;
-  margin: 0 auto;
-}
-.unsuccess-top::before {
-  background-color: #959595 !important;
-}
-.unsuccess-bottom::after {
-  background-color: #959595 !important;
-}
-.unsuccess-full::before,
-.unsuccess-full::after {
-  background-color: #959595 !important;
-}
-.success-top::before {
-  background-color: #4caf50 !important;
-}
-.success-bottom::after {
-  background-color: #4caf50 !important;
-}
-.success-full::before,
-.success-full::after {
-  background-color: #4caf50 !important;
-}
+.timeline { width: 30px; margin: 0 auto; }
+.unsuccess-top::before { background-color: #959595 !important; }
+.unsuccess-bottom::after { background-color: #959595 !important; }
+.unsuccess-full::before, .unsuccess-full::after { background-color: #959595 !important; }
+.success-top::before { background-color: #4caf50 !important; }
+.success-bottom::after { background-color: #4caf50 !important; }
+.success-full::before, .success-full::after { background-color: #4caf50 !important; }
 .timeline-line-full::before {
-  content: "";
-  position: absolute;
-  width: 2px;
-  height: 100%;
-  transform: translate(-50%);
-  top: 0;
-  left: 50%;
-  z-index: 0;
+  content: ""; position: absolute; width: 2px; height: 100%;
+  transform: translate(-50%); top: 0; left: 50%; z-index: 0;
 }
 .timeline-line-top::before {
-  content: "";
-  position: absolute;
-  width: 2px;
-  height: 50%;
-  transform: translate(-50%);
-  top: 0;
-  left: 50%;
-  z-index: 0;
+  content: ""; position: absolute; width: 2px; height: 50%;
+  transform: translate(-50%); top: 0; left: 50%; z-index: 0;
 }
 .timeline-line-bottom::after {
-  content: "";
-  position: absolute;
-  width: 2px;
-  height: 50%;
-  transform: translate(-50%);
-  bottom: 0;
-  left: 50%;
-  z-index: 0;
+  content: ""; position: absolute; width: 2px; height: 50%;
+  transform: translate(-50%); bottom: 0; left: 50%; z-index: 0;
+}
+:deep(.q-tooltip.tooltip-lg) {
+  font-size: 16px;   /* ขนาดตัวอักษร */
+  line-height: 1.6;
+  padding: 8px 10px;
 }
 </style>

@@ -1,4 +1,4 @@
-// server/models/file.ts
+// server/models/file.ts (ของเดิมไกด์ ใช้ต่อได้)
 import mongoose from 'mongoose'
 const { Schema } = mongoose
 
@@ -13,17 +13,35 @@ const fileSchema = new Schema({
   dateSigned:       { type: String },
   amount:           { type: Number },
   data:             { type: Schema.Types.Buffer },
-
-  // ✅ ฟิลด์ใหม่
-  fileSha256:       { type: String, index: true },     // sparse unique index ด้านล่าง
+  fileSha256:       { type: String, index: true },
   program:          { type: String },
   unit_display:     { type: String },
   asset_pea_numbers:{ type: [String], default: [] },
 })
-
-// เดิม
 fileSchema.index({ request_no: 1, step: 1, uploadedAt: -1 })
-// ✅ กันไฟล์ซ้ำทั้งก้อน
-fileSchema.index({ fileSha256: 1 }, { unique: true, sparse: true, name: 'uniq_fileSha256' })
-
+fileSchema.index(
+  { fileSha256: 1 },
+  {
+    unique: true,
+    name: 'uniq_step1_hash_global',
+    partialFilterExpression: { step: '1', fileSha256: { $exists: true } },
+  }
+)
+export type FileDoc = {
+  _id: mongoose.Types.ObjectId
+  request_no: string
+  step: string
+  storedFilename: string
+  originalFilename: string
+  mimetype?: string
+  uploadedAt: Date
+  documentNo?: string
+  dateSigned?: string
+  amount?: number
+  data: Buffer
+  fileSha256?: string
+  program?: string
+  unit_display?: string
+  asset_pea_numbers?: string[]
+}
 export default mongoose.models.File || mongoose.model('File', fileSchema)
